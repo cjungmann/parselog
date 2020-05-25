@@ -1,0 +1,13 @@
+Use this file to test
+scanner.c::read_lines().
+
+test long lines with:
+./scanner -t -b 30 -f lines.txt
+
+test completion with:
+./scanner -t -b 35 -f lines.txt
+
+1234567890
+12345678912340
+12340
+123457782148239490
