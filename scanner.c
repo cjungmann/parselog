@@ -12,183 +12,284 @@
 // for memmove(), strstr()
 #include <string.h>
 
-#include <alloca.h>
+#include <alloca.h>   // for alloca
+#include <stdlib.h>   // for malloc/free
 
-typedef void (*string_processor_t)(const char *str);
+#include <time.h>     // for clock() for timing alternative run paths
 
+#include "psyslog.h"
+#include "line_reader.h"
+#include "fields.h"
 
-// Line processor prototypes:
-string_processor_t process_string = NULL;
-void save_ipt_lines(const char* str);
-void test_line_reader(const char *str);
-
-// Clargs callbacks for setting line processor
-void set_ipt_line_reader(const DefLine *option, const char *value)
+typedef struct _text_link
 {
-   process_string = save_ipt_lines;
+   char *line;
+   struct _text_link *next;
+} TLink;
+
+typedef void(*text_link_deleter_t)(TLink *link);
+
+void delete_text_chain_ordered(TLink *link)
+{
+   TLink *next;
+   while (link)
+   {
+      next = link->next;
+
+      free(link->line);
+      free(link);
+
+      link = next;
+   }
 }
 
-void set_test_line_reader(const DefLine *option, const char *value)
+void delete_text_chain_recursive(TLink *link)
 {
-   process_string = test_line_reader;
+   if (link)
+   {
+      if (link->next)
+         delete_text_chain_recursive(link->next);
+
+      free(link->line);
+      free(link);
+   }
 }
+
+void tlink_nonfreer(TLink* link) { ; }
+
+text_link_deleter_t text_link_deleter = NULL;
+
+
+
+
+typedef struct _log_link
+{
+   char *msg;
+   struct _log_link *next;
+} LLink;
+
+typedef void(*log_link_deleter_t)(LLink *link);
+
+void delete_log_chain_ordered(LLink *link)
+{
+   LLink *next;
+   while (link)
+   {
+      next = link->next;
+      free(link->msg);
+      free(link);
+
+      link = next;
+   }
+}
+
+void delete_log_chain_recursive(LLink *link)
+{
+   if (link)
+   {
+      if (link->next)
+         delete_log_chain_recursive(link->next);
+
+      free(link->msg);
+      free(link);
+   }
+}
+
+void llink_nonfreer(LLink* link) { ; }
+
+log_link_deleter_t log_link_deleter = NULL;
+
+
+
+typedef void* (*memmaker_t)(size_t size);
+typedef void (*memfreer_t)(void*);
+
+void* stackalloc(size_t size) { return alloca(size); }
+
+memmaker_t memmaker = NULL;
+memfreer_t memfreer = NULL;
+
+
+
 
 
 // Prepare clargs target variables:
-const char *Syslog="/var/log/syslog";
-int flagHelp = 0;
+const char*  Syslog="/var/log/syslog";
+int          ShowHelp = 0;
 unsigned int BuffSize = 16384;
+int          PlainText = 0;       // File processor flag
+int          StackSave = 0;       // Line save method
+int          RecursiveDelete = 0; // 
+int          MemoryRepeats = 1;
+const char*  FieldNames = NULL;
 
 DefLine defs[] = {
-   { 'h', "Show help", &flagHelp, NULL },
-   { 'b', "Change buffer size.",  &BuffSize, clargs_set_int },
-   { 'f', "Set file to process.", &Syslog,   clargs_set_string },
-   { 't', "Use test line reader", NULL,      set_test_line_reader },
-   { 'i', "Use ipt line reader",  NULL,      set_ipt_line_reader },
+   { 'h', "Show help",            &ShowHelp,      NULL },
+   { 'b', "Change buffer size.",  &BuffSize,      clargs_set_int },
+   { 'p', "Set file to process.", &Syslog,        clargs_set_string },
+   { 't', "File is plain text.",  &PlainText,     NULL },
+   { 'r', "Set repeat count.",    &MemoryRepeats, clargs_set_int },
+   { 's', "Save lines in stack.", &StackSave,     NULL },
+   /* { 'f', "Comma-separated field names", &FieldNames, clargs_set_string }, */
    CLARGS_END_DEF
 };
 
-// Return pointer to next line if end-of-string is detecged
-char* terminate_string(char *str, const char *end)
+typedef void (*file_processor_t)(LRScope *scope);
+file_processor_t file_processor = NULL;
+
+// Four possible processors, Text or Log file,
+// saving lines to Heap or Stack
+
+void text_file_processor(LRScope *scope)
 {
-   char *ptr = str;
+   TLink *new, *tail = NULL, *root = NULL;
+   char *newline;
+   int linelen;
 
-   while (ptr < end)
+   const char *line, *line_end;
+   while (lr_get_line(scope, &line, &line_end))
    {
-      if (*ptr == '\r')
-         *ptr++ = '\0';
-
-      if (*ptr == '\n')
+      linelen = line_end - line;
+      newline = (char*)(*memmaker)(1 + linelen);
+      if (newline)
       {
-         *ptr = '\0';
-         return ptr+1;
-      }
+         memcpy(newline, line, linelen);
 
-      ++ptr;
-   }
-
-   return NULL;
-}
-
-int read_lines(int file_handle)
-{
-   char *buff = alloca(BuffSize);
-   char *str, *nextstr, *end_of_data;
-   const char *end = &buff[BuffSize];
-
-   size_t bytes_to_read;
-   ssize_t bytes_read;
-
-   // Prepare for first time through loop
-   end_of_data = buff;
-   bytes_to_read = BuffSize;
-
-   while ((bytes_read = read(file_handle, end_of_data, bytes_to_read)))
-   {
-      if (bytes_read < bytes_to_read)
-         end_of_data[bytes_read] = '\0';
-
-      end_of_data += bytes_read;
-      str = buff;
-
-      while (str < end_of_data)
-      {
-         if ((nextstr = terminate_string(str, end)))
+         new = (TLink*)(*memmaker)(sizeof(TLink));
+         if (new)
          {
-            (*process_string)(str);
-            str = nextstr;
+            memset(new, 0, sizeof(TLink));
+            new->line = newline;
+
+            if (tail)
+            {
+               tail->next = new;
+               tail = new;
+            }
+            else
+               root = tail = new;
          }
          else
          {
-            int remaining_data = end_of_data - str;
-
-            if (remaining_data < BuffSize)
-            {
-               memmove(buff, str, remaining_data );
-               end_of_data = buff + remaining_data;
-               bytes_to_read = end - end_of_data;
-            }
-            else
-            {
-               buff[BuffSize-1] = '\0';
-               fprintf(stderr,
-                       "Buffer too small (%u bytes) to contain a complete line.\n[32;1m%s[m.\n",
-                       BuffSize, buff);
-
-               return 1;
-            }
-
+            fprintf(stderr, "Out of memory; abandoning the loop\n");
+            (*memfreer)(newline);
             break;
-         }  
+         }
+      }
+      else
+      {
+         fprintf(stderr, "Out of memory; abandoning the loop\n");
+         break;
       }
    }
 
-   // Process the final line that remains in the buffer.
-   (*process_string)(str);
+   (*text_link_deleter)(root);
+}
 
-   return 0;
+void log_file_processor(LRScope *scope)
+{
+   // for now...
+   /* LLink *new, *root = NULL; */
+   LLink *root = NULL;
+
+   const char *line, *line_end;
+   while (lr_get_line(scope, &line, &line_end))
+   {
+   }
+
+   (*log_link_deleter)(root);
 }
 
 
-int read_syslog(const char *filepath)
+// Picks the appropriate processor according to user selections:
+void set_processors(void)
+{
+   // Set memory allocator
+   if (StackSave)
+      memmaker = stackalloc;
+   else
+      memmaker = malloc;
+   /* memmaker = StackSave ? __builtin_alloca : malloc; */
+
+   // Set memory freer (or not)
+   if (PlainText)
+   {
+      file_processor = text_file_processor;
+      if (StackSave)
+         text_link_deleter = tlink_nonfreer;
+      else
+         text_link_deleter = RecursiveDelete ? delete_text_chain_ordered : delete_text_chain_recursive;
+   }
+   else
+   {
+      file_processor = log_file_processor;
+      if (StackSave)
+         log_link_deleter = llink_nonfreer;
+      else
+      log_link_deleter = RecursiveDelete ? delete_log_chain_ordered : delete_log_chain_recursive;
+   }
+}
+
+
+int read_file(const char *filepath)
 {
    int file_handle = open(filepath, O_RDONLY);
    if (file_handle > -1)
    {
-      read_lines(file_handle);
+      LRScope scope;
+      char *buffer = (char*)alloca(BuffSize);
+
+      clock_t start, end;
+      int repeats = 0;
+
+      start = clock();
+
+      while ( repeats++ < MemoryRepeats )
+      {
+         lseek( file_handle, 0, SEEK_SET);
+
+         if (lr_init_scope(&scope, buffer, BuffSize, file_handle))
+         {
+            const char *line, *line_end;
+            while (lr_get_line(&scope, &line, &line_end))
+               (*file_processor)(&scope);
+         }
+      }
+
+      end = clock();
       
       close(file_handle);
+
+      printf("%ld clock ticks, %f seconds to run %d iterations.\n",
+             end - start,
+             (double)(end - start) / CLOCKS_PER_SEC,
+             MemoryRepeats);
+
       return 0;
    }
 
    return 1;
 }
 
-/**
- * Alternate line processors follow:
- */
-
-void save_ipt_line(const char *str)
-{
-   const char *ptr = str;
-   while (*ptr)
-   {
-      ++ptr;
-   }
-}
-
-void save_ipt_lines(const char* str)
-{
-   if (strstr(str, " IPT ") != NULL)
-   {
-      save_ipt_line(str);
-   }
-}
-
-void test_line_reader(const char *str)
-{
-   printf("%s\n", str);
-}
-
-/**
- * CL arguments response functions
- */
-
 
 int main(int argc, const char **argv)
 {
    clargs_process( defs, argc, argv );
-   if ( flagHelp )
+   if ( ShowHelp )
    {
       clargs_show(defs);
       return 0;
    }
 
-   if (!process_string)
-      process_string = save_ipt_lines;
+   /* FItem *fields = NULL; */
+
+   /* if ( FieldNames ) */
+   /*    fields = init_field_names(FieldNames); */
+
+   set_processors();
 
    printf("About to process %s.\n", Syslog);
-   read_syslog(Syslog);
+   read_file(Syslog);
 
    return 0;
 }
