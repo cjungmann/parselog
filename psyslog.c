@@ -117,6 +117,37 @@ int syslog_parse_line(const char *str, syslog_use_parsed sup)
    return 0;
 }
 
+/**
+ * In contrast with syslog_parse_line() that uses a callback function,
+ * this function processes the log string in place, replacing certain
+ * characters with \0 to terminate enclosed substrings.
+ */
+int syslog_break_line(char *str, SLDate *sldate, char **host, char **tag, char **msg)
+{
+   *host = *tag = *msg = NULL;
+
+   char *ptr = str;
+   ptr += parse_timestamp(sldate, str);
+   
+   *host = ptr;
+   ptr = strchr(*host, ' ');
+   if (ptr)
+   {
+      *ptr++ = '\0';
+      *tag = ptr;
+
+      ptr = strchr(*tag, ':');
+      if (ptr)
+      {
+         *ptr++ = '\0';
+         *msg = ptr + 1;
+         return 1;
+      }
+   }
+
+   return 0;
+}
+
 
 #ifdef PSYSLOG_MAIN
 
