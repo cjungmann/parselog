@@ -1,13 +1,10 @@
 #include <stdio.h>
 #include <clargs.h>
 
-// For low-level file access
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
+#include "psyslog.h"
+#include "line_reader.h"
+#include "fields.h"
 
-// for read(), etc.
-#include <unistd.h>
 
 // for memmove(), strstr()
 #include <string.h>
@@ -17,9 +14,6 @@
 
 #include <time.h>     // for clock() for timing alternative run paths
 
-#include "psyslog.h"
-#include "line_reader.h"
-#include "fields.h"
 
 typedef struct _text_link
 {

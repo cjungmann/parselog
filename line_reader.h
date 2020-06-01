@@ -1,3 +1,10 @@
+// For low-level file access
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
+// for read(), etc.
+#include <unistd.h>
 
 typedef struct _line_reader_scope
 {
